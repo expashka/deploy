@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# deploy — interactive site selector for sites-deploy
+# https://github.com/expashka/deploy
+set -euo pipefail
+
+SITES_DIR="${SITES_DIR:-/opt/docker-hosting/sites}"
+
+# Collect sites with .deploy.env (depth 1 and 2)
+sites=()
+paths=()
+while IFS= read -r f; do
+  dir="$(dirname "$f")"
+  rel="${dir#$SITES_DIR/}"
+  sites+=("$rel")
+  paths+=("$dir")
+done < <(find "$SITES_DIR" -mindepth 2 -maxdepth 5 -name ".deploy.env" | sort)
+
+if [[ ${#sites[@]} -eq 0 ]]; then
+  echo "Нет сайтов с .deploy.env в $SITES_DIR"
+  exit 1
+fi
+
+selected=0
+total=${#sites[@]}
+
+draw() {
+  clear
+  echo "  Выберите сайт для деплоя:"
+  echo ""
+  for i in "${!sites[@]}"; do
+    if [[ $i -eq $selected ]]; then
+      printf '  \033[1m▶  %s\033[0m\n' "${sites[$i]}"
+    else
+      printf '     %s\n' "${sites[$i]}"
+    fi
+  done
+  echo ""
+  echo "  ↑↓ — выбор   Enter — деплой   q — выход"
+}
+
+draw
+while true; do
+  IFS= read -r -s -n1 key
+  if [[ $key == $'\x1b' ]]; then
+    read -r -s -n2 key2
+    case "$key2" in
+      '[A') (( selected > 0 )) && (( selected-- )) ;;
+      '[B') (( selected < total - 1 )) && (( selected++ )) ;;
+    esac
+  elif [[ $key == '' ]]; then
+    break
+  elif [[ $key == 'q' ]]; then
+    echo "Отмена."
+    exit 0
+  fi
+  draw
+done
+
+site_path="${paths[$selected]}"
+clear
+echo "→ Деплой: ${sites[$selected]}"
+echo ""
+cd "$site_path"
+sites-deploy

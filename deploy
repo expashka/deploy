@@ -42,11 +42,14 @@ draw
 while true; do
   IFS= read -r -s -n1 key
   if [[ $key == $'\x1b' ]]; then
-    read -r -s -n2 key2
-    case "$key2" in
-      '[A') (( selected > 0 )) && (( selected-- )) ;;
-      '[B') (( selected < total - 1 )) && (( selected++ )) ;;
-    esac
+    read -r -s -n1 -t 0.1 key2 || true
+    read -r -s -n1 -t 0.1 key3 || true
+    if [[ $key2 == '[' ]]; then
+      case "$key3" in
+        'A') (( selected > 0 )) && (( selected-- )) ;;
+        'B') (( selected < total - 1 )) && (( selected++ )) ;;
+      esac
+    fi
   elif [[ $key == '' ]]; then
     break
   elif [[ $key == 'q' ]]; then

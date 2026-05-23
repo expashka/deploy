@@ -46,8 +46,8 @@ while true; do
     read -r -s -n1 -t 0.1 key3 || true
     if [[ $key2 == '[' ]]; then
       case "$key3" in
-        'A') (( selected > 0 )) && (( selected-- )) ;;
-        'B') (( selected < total - 1 )) && (( selected++ )) ;;
+        'A') [[ $selected -gt 0 ]] && selected=$(( selected - 1 )) || true ;;
+        'B') [[ $selected -lt $(( total - 1 )) ]] && selected=$(( selected + 1 )) || true ;;
       esac
     fi
   elif [[ $key == '' ]]; then

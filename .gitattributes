@@ -1,0 +1,4 @@
+* text=auto eol=lf
+*.sh text eol=lf
+sites-deploy text eol=lf
+install.sh text eol=lf

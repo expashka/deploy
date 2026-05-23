@@ -1,0 +1,212 @@
+#!/usr/bin/env bash
+# sites-deploy — universal deploy for static + Docker Compose sites.
+# https://github.com/expashka/deploy
+#
+# Run from a project root that contains compose.yml and (optionally)
+# .deploy.env with overrides and .deploy/*.sh lifecycle hooks.
+
+set -euo pipefail
+
+VERSION="0.1.0"
+
+# ───────────── flags ─────────────
+case "${1:-}" in
+  --version|-v)
+    echo "sites-deploy $VERSION"
+    exit 0
+    ;;
+  --self-update)
+    URL="${SITES_DEPLOY_INSTALL_URL:-https://raw.githubusercontent.com/expashka/deploy/main/install.sh}"
+    exec bash -c "curl -fsSL '$URL' | bash"
+    ;;
+  -h|--help)
+    cat <<EOF
+sites-deploy $VERSION
+Usage: cd <project-root> && sites-deploy
+
+Reads optional config from ./.deploy.env. Runs optional hooks from
+./.deploy/{pre-build,pre-up,post-up}.sh. Per-step health checks via
+HEALTH_CHECKS="label:url label:url ...".
+
+Flags:
+  --version, -v       show version
+  --self-update       reinstall from upstream
+EOF
+    exit 0
+    ;;
+esac
+
+# ───────────── pretty output ─────────────
+if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+  BOLD=$'\033[1m'; DIM=$'\033[2m'; RESET=$'\033[0m'
+  RED=$'\033[31m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'; BLUE=$'\033[34m'; CYAN=$'\033[36m'
+else
+  BOLD=""; DIM=""; RESET=""; RED=""; GREEN=""; YELLOW=""; BLUE=""; CYAN=""
+fi
+
+START_TS=$(date +%s)
+STEP=0
+TOTAL_STEPS=9
+
+step()  { STEP=$((STEP + 1)); printf '\n%s[%d/%d]%s %s%s%s\n' "$BOLD$BLUE" "$STEP" "$TOTAL_STEPS" "$RESET" "$BOLD" "$1" "$RESET"; }
+info()  { printf '   %s•%s %s\n' "$DIM" "$RESET" "$1"; }
+ok()    { printf '   %s✓%s %s\n' "$GREEN" "$RESET" "$1"; }
+warn()  { printf '   %s!%s %s\n' "$YELLOW" "$RESET" "$1"; }
+err()   { printf '   %s✗%s %s\n' "$RED" "$RESET" "$1" >&2; }
+
+elapsed() { printf '%ss' "$(( $(date +%s) - START_TS ))"; }
+
+die() {
+  err "$1"
+  printf '\n%s✗ DEPLOY FAILED%s after %s\n' "$BOLD$RED" "$RESET" "$(elapsed)" >&2
+  exit "${2:-1}"
+}
+
+trap 'die "unexpected error on line $LINENO" $?' ERR
+
+# ───────────── load config ─────────────
+PROJECT_DIR="$(pwd)"
+if [[ -f "$PROJECT_DIR/.deploy.env" ]]; then
+  # shellcheck disable=SC1091
+  set -a; source "$PROJECT_DIR/.deploy.env"; set +a
+fi
+
+PROJECT_NAME="$(basename "$PROJECT_DIR")"
+BRANCH="${BRANCH:-main}"
+DOMAIN="${DOMAIN:-}"
+HEALTH_CHECKS="${HEALTH_CHECKS:-}"
+HEALTH_RETRIES="${HEALTH_RETRIES:-20}"
+HEALTH_DELAY="${HEALTH_DELAY:-1}"
+REQUIRE_FILES="${REQUIRE_FILES:-}"
+DIRTY_EXCLUDE="${DIRTY_EXCLUDE:-}"
+BUILD_SERVICES="${BUILD_SERVICES:-}"
+UP_SERVICES="${UP_SERVICES:-}"
+SKIP_BUILD="${SKIP_BUILD:-0}"
+
+printf '%s┌─ sites-deploy v%s %s%s%s\n' "$BOLD$CYAN" "$VERSION" "$BOLD" "$PROJECT_NAME" "$RESET"
+[[ -n "$DOMAIN" ]] && printf '%s│  domain: %s%s\n' "$DIM" "$DOMAIN" "$RESET"
+printf '%s│  branch: %s%s%s\n' "$DIM" "$BOLD" "$BRANCH" "$RESET"
+
+# ───────────── preflight ─────────────
+step "Checking dependencies"
+for bin in git docker curl; do
+  command -v "$bin" >/dev/null 2>&1 || die "$bin not found" 127
+  ok "$bin"
+done
+
+# ───────────── git ─────────────
+step "Fetching latest changes"
+git fetch origin "$BRANCH" --quiet
+ok "fetched origin/$BRANCH"
+
+step "Verifying clean worktree"
+DIRTY_ARGS=(":!deploy" ":!.deploy.env")
+if [[ -n "$DIRTY_EXCLUDE" ]]; then
+  IFS=' ' read -r -a extra <<< "$DIRTY_EXCLUDE"
+  for f in "${extra[@]}"; do
+    DIRTY_ARGS+=(":!$f")
+  done
+fi
+if [[ -n "$(git status --porcelain -- "${DIRTY_ARGS[@]}")" ]]; then
+  git status --porcelain -- "${DIRTY_ARGS[@]}" >&2
+  die "working tree is dirty; aborting" 2
+fi
+ok "worktree clean"
+
+step "Pulling (fast-forward only)"
+BEFORE_REF="$(git rev-parse --short HEAD)"
+git pull --ff-only origin "$BRANCH" --quiet
+AFTER_REF="$(git rev-parse --short HEAD)"
+if [[ "$BEFORE_REF" == "$AFTER_REF" ]]; then
+  info "already up to date at ${BOLD}${AFTER_REF}${RESET}"
+else
+  ok "updated ${DIM}${BEFORE_REF}${RESET} → ${BOLD}${AFTER_REF}${RESET}"
+fi
+
+# ───────────── validate ─────────────
+step "Validating configuration"
+if [[ -n "$REQUIRE_FILES" ]]; then
+  IFS=' ' read -r -a required <<< "$REQUIRE_FILES"
+  for f in "${required[@]}"; do
+    [[ -f "$PROJECT_DIR/$f" ]] || die "required file missing: $f" 3
+    ok "$f present"
+  done
+fi
+docker compose config >/dev/null || die "compose config invalid"
+ok "compose config valid"
+
+# ───────────── hook runner ─────────────
+run_hook() {
+  local name="$1"
+  local hook="$PROJECT_DIR/.deploy/${name}.sh"
+  if [[ -f "$hook" ]]; then
+    info "→ running .deploy/${name}.sh"
+    BRANCH="$BRANCH" \
+    BEFORE_REF="$BEFORE_REF" \
+    AFTER_REF="$AFTER_REF" \
+    PROJECT_DIR="$PROJECT_DIR" \
+    PROJECT_NAME="$PROJECT_NAME" \
+      bash "$hook" || die "${name} hook failed"
+    ok "${name} hook done"
+  else
+    info "no ${name} hook"
+  fi
+}
+
+# ───────────── build ─────────────
+step "Building images"
+if [[ "$SKIP_BUILD" == "1" ]]; then
+  info "SKIP_BUILD=1 — skipping"
+else
+  run_hook "pre-build"
+  if [[ -n "$BUILD_SERVICES" ]]; then
+    IFS=' ' read -r -a services <<< "$BUILD_SERVICES"
+    docker compose build "${services[@]}"
+  else
+    docker compose build
+  fi
+  ok "images built"
+fi
+
+# ───────────── up ─────────────
+step "Starting containers"
+run_hook "pre-up"
+if [[ -n "$UP_SERVICES" ]]; then
+  IFS=' ' read -r -a services <<< "$UP_SERVICES"
+  docker compose up -d --force-recreate "${services[@]}"
+else
+  docker compose up -d --force-recreate
+fi
+ok "containers up"
+
+run_hook "post-up"
+
+# ───────────── health ─────────────
+step "Health checks"
+if [[ -z "$HEALTH_CHECKS" ]]; then
+  info "no HEALTH_CHECKS configured — skipping"
+else
+  wait_for_health() {
+    local label="$1" url="$2" attempt
+    for ((attempt = 1; attempt <= HEALTH_RETRIES; attempt++)); do
+      if curl -fsS "$url" >/dev/null 2>&1; then
+        ok "${label} healthy ${DIM}(${attempt}/${HEALTH_RETRIES})${RESET}"
+        return 0
+      fi
+      (( attempt < HEALTH_RETRIES )) && { info "${label} not ready (${attempt}/${HEALTH_RETRIES}), retrying in ${HEALTH_DELAY}s…"; sleep "$HEALTH_DELAY"; }
+    done
+    die "${label} health check failed: ${url}"
+  }
+  IFS=' ' read -r -a checks <<< "$HEALTH_CHECKS"
+  for entry in "${checks[@]}"; do
+    label="${entry%%:*}"
+    url="${entry#*:}"
+    [[ -n "$label" && -n "$url" ]] || { warn "skipping malformed health check: $entry"; continue; }
+    wait_for_health "$label" "$url"
+  done
+fi
+
+# ───────────── done ─────────────
+trap - ERR
+printf '\n%s✓ DEPLOYED%s %s%s%s in %s\n' "$BOLD$GREEN" "$RESET" "$BOLD" "$AFTER_REF" "$RESET" "$(elapsed)"
+[[ -n "$DOMAIN" ]] && printf '%s└─ %s is live%s\n' "$DIM" "$DOMAIN" "$RESET"

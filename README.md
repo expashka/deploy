@@ -38,6 +38,7 @@ BRANCH=main
 BUILD_SERVICES=""       # пусто = все, иначе "service-a service-b"
 UP_SERVICES=""          # пусто = все
 SKIP_BUILD=0            # 1 чтобы пропустить docker compose build
+PRE_BUILD_COMMAND=""    # команда перед docker compose build, например "npm run build"
 ```
 
 ### Что значит каждое
@@ -54,10 +55,17 @@ SKIP_BUILD=0            # 1 чтобы пропустить docker compose build
 | `BUILD_SERVICES` | Если нужно собирать только часть сервисов. |
 | `UP_SERVICES` | Если нужно поднимать только часть сервисов. |
 | `SKIP_BUILD` | Не запускать `docker compose build`. |
+| `PRE_BUILD_COMMAND` | Команда из корня проекта после `git pull`, до `.deploy/pre-build.sh` и `docker compose build`. Удобно для проектов, где Dockerfile копирует уже готовую сборку, например `npm run build` для Next.js standalone. |
 
 ## Хуки: `.deploy/*.sh`
 
 Если файл существует — будет запущен на нужном шаге.
+
+Если для простого случая не нужен отдельный shell-файл, используйте `PRE_BUILD_COMMAND` в `.deploy.env`:
+
+```bash
+PRE_BUILD_COMMAND="npm run build"
+```
 
 | Файл | Когда |
 |---|---|

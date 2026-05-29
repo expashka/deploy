@@ -7,7 +7,7 @@
 
 set -euo pipefail
 
-VERSION="0.1.0"
+VERSION="0.1.1"
 
 # ───────────── flags ─────────────
 case "${1:-}" in
@@ -82,6 +82,7 @@ DIRTY_EXCLUDE="${DIRTY_EXCLUDE:-}"
 BUILD_SERVICES="${BUILD_SERVICES:-}"
 UP_SERVICES="${UP_SERVICES:-}"
 SKIP_BUILD="${SKIP_BUILD:-0}"
+PRE_BUILD_COMMAND="${PRE_BUILD_COMMAND:-}"
 
 printf '%s┌─ sites-deploy v%s %s%s%s\n' "$BOLD$CYAN" "$VERSION" "$BOLD" "$PROJECT_NAME" "$RESET"
 [[ -n "$DOMAIN" ]] && printf '%s│  domain: %s%s\n' "$DIM" "$DOMAIN" "$RESET"
@@ -153,11 +154,27 @@ run_hook() {
   fi
 }
 
+run_config_command() {
+  local name="$1"
+  local command="$2"
+  if [[ -n "$command" ]]; then
+    info "→ running ${name}: ${command}"
+    BRANCH="$BRANCH" \
+    BEFORE_REF="$BEFORE_REF" \
+    AFTER_REF="$AFTER_REF" \
+    PROJECT_DIR="$PROJECT_DIR" \
+    PROJECT_NAME="$PROJECT_NAME" \
+      bash -lc "$command" || die "${name} failed"
+    ok "${name} done"
+  fi
+}
+
 # ───────────── build ─────────────
 step "Building images"
 if [[ "$SKIP_BUILD" == "1" ]]; then
   info "SKIP_BUILD=1 — skipping"
 else
+  run_config_command "PRE_BUILD_COMMAND" "$PRE_BUILD_COMMAND"
   run_hook "pre-build"
   if [[ -n "$BUILD_SERVICES" ]]; then
     IFS=' ' read -r -a services <<< "$BUILD_SERVICES"

@@ -83,6 +83,10 @@ BUILD_SERVICES="${BUILD_SERVICES:-}"
 UP_SERVICES="${UP_SERVICES:-}"
 SKIP_BUILD="${SKIP_BUILD:-0}"
 PRE_BUILD_COMMAND="${PRE_BUILD_COMMAND:-}"
+PRUNE_BEFORE_BUILD="${PRUNE_BEFORE_BUILD:-1}"   # reclaim dangling images + old cache before build
+PRUNE_CACHE_KEEP="${PRUNE_CACHE_KEEP:-168h}"    # keep build cache newer than this on normal prune
+MIN_FREE_GB="${MIN_FREE_GB:-5}"                 # below this much free → aggressive prune
+BUILD_RETRY_ON_DISK="${BUILD_RETRY_ON_DISK:-1}" # on build failure, aggressive prune + retry once
 
 printf '%s┌─ sites-deploy v%s %s%s%s\n' "$BOLD$CYAN" "$VERSION" "$BOLD" "$PROJECT_NAME" "$RESET"
 [[ -n "$DOMAIN" ]] && printf '%s│  domain: %s%s\n' "$DIM" "$DOMAIN" "$RESET"
@@ -169,6 +173,30 @@ run_config_command() {
   fi
 }
 
+# ───────────── disk space helpers ─────────────
+docker_root() {
+  docker info --format '{{.DockerRootDir}}' 2>/dev/null || echo /var/lib/docker
+}
+
+# available whole GB on the filesystem holding $1 (empty if it can't be read)
+free_gb() {
+  df -BG --output=avail "$1" 2>/dev/null | tail -1 | tr -dc '0-9'
+}
+
+# reclaim_space normal|aggressive — frees Docker storage
+reclaim_space() {
+  if [[ "${1:-normal}" == "aggressive" ]]; then
+    info "pruning ALL unused images + build cache + stopped containers"
+    docker container prune -f  >/dev/null 2>&1 || true
+    docker image prune -af     >/dev/null 2>&1 || true
+    docker builder prune -af   >/dev/null 2>&1 || true
+  else
+    info "pruning dangling images + build cache older than ${PRUNE_CACHE_KEEP}"
+    docker image prune -f                              >/dev/null 2>&1 || true
+    docker builder prune -f --filter "until=${PRUNE_CACHE_KEEP}" >/dev/null 2>&1 || true
+  fi
+}
+
 # ───────────── build ─────────────
 step "Building images"
 if [[ "$SKIP_BUILD" == "1" ]]; then
@@ -176,11 +204,40 @@ if [[ "$SKIP_BUILD" == "1" ]]; then
 else
   run_config_command "PRE_BUILD_COMMAND" "$PRE_BUILD_COMMAND"
   run_hook "pre-build"
-  if [[ -n "$BUILD_SERVICES" ]]; then
-    IFS=' ' read -r -a services <<< "$BUILD_SERVICES"
-    docker compose build "${services[@]}"
-  else
-    docker compose build
+
+  DOCKER_ROOT="$(docker_root)"
+  AVAIL="$(free_gb "$DOCKER_ROOT")"
+  [[ -n "$AVAIL" ]] && info "disk free at ${DOCKER_ROOT}: ${AVAIL}G"
+  if [[ "$PRUNE_BEFORE_BUILD" == "1" ]]; then
+    if [[ -n "$AVAIL" && "$AVAIL" -lt "$MIN_FREE_GB" ]]; then
+      warn "below ${MIN_FREE_GB}G free — aggressive prune"
+      reclaim_space aggressive
+    else
+      reclaim_space normal
+    fi
+    AVAIL="$(free_gb "$DOCKER_ROOT")"
+    [[ -n "$AVAIL" ]] && ok "disk free after prune: ${AVAIL}G"
+  fi
+
+  do_build() {
+    if [[ -n "$BUILD_SERVICES" ]]; then
+      IFS=' ' read -r -a services <<< "$BUILD_SERVICES"
+      docker compose build "${services[@]}"
+    else
+      docker compose build
+    fi
+  }
+
+  if ! do_build; then
+    if [[ "$BUILD_RETRY_ON_DISK" == "1" ]]; then
+      warn "build failed — reclaiming all unused space and retrying once"
+      reclaim_space aggressive
+      AVAIL="$(free_gb "$DOCKER_ROOT")"
+      [[ -n "$AVAIL" ]] && info "disk free after prune: ${AVAIL}G"
+      do_build || die "image build failed even after disk cleanup; free more space on ${DOCKER_ROOT}"
+    else
+      die "image build failed"
+    fi
   fi
   ok "images built"
 fi

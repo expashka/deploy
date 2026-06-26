@@ -39,6 +39,7 @@ BUILD_SERVICES=""       # пусто = все, иначе "service-a service-b"
 UP_SERVICES=""          # пусто = все
 SKIP_BUILD=0            # 1 чтобы пропустить docker compose build
 PRE_BUILD_COMMAND=""    # команда перед docker compose build, например "npm run build"
+GIT_TIMEOUT=60          # таймаут git fetch/pull в секундах
 ```
 
 ### Что значит каждое
@@ -56,6 +57,7 @@ PRE_BUILD_COMMAND=""    # команда перед docker compose build, нап
 | `UP_SERVICES` | Если нужно поднимать только часть сервисов. |
 | `SKIP_BUILD` | Не запускать `docker compose build`. |
 | `PRE_BUILD_COMMAND` | Команда из корня проекта после `git pull`, до `.deploy/pre-build.sh` и `docker compose build`. Удобно для проектов, где Dockerfile копирует уже готовую сборку, например `npm run build` для Next.js standalone. |
+| `GIT_TIMEOUT` | Таймаут для `git fetch` и `git pull`; git prompt отключён, чтобы auth/network проблемы не зависали молча. |
 
 ## Хуки: `.deploy/*.sh`
 

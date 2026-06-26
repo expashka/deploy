@@ -87,6 +87,7 @@ PRUNE_BEFORE_BUILD="${PRUNE_BEFORE_BUILD:-1}"   # reclaim dangling images + old 
 PRUNE_CACHE_KEEP="${PRUNE_CACHE_KEEP:-168h}"    # keep build cache newer than this on normal prune
 MIN_FREE_GB="${MIN_FREE_GB:-5}"                 # below this much free → aggressive prune
 BUILD_RETRY_ON_DISK="${BUILD_RETRY_ON_DISK:-1}" # on build failure, aggressive prune + retry once
+GIT_TIMEOUT="${GIT_TIMEOUT:-60}"                # fail git network/auth steps instead of hanging forever
 
 printf '%s┌─ sites-deploy v%s %s%s%s\n' "$BOLD$CYAN" "$VERSION" "$BOLD" "$PROJECT_NAME" "$RESET"
 [[ -n "$DOMAIN" ]] && printf '%s│  domain: %s%s\n' "$DIM" "$DOMAIN" "$RESET"
@@ -99,9 +100,21 @@ for bin in git docker curl; do
   ok "$bin"
 done
 
+run_git() {
+  local label="$1"
+  shift
+  GIT_TERMINAL_PROMPT=0 timeout "$GIT_TIMEOUT" git "$@" || {
+    local code=$?
+    if [[ "$code" == "124" ]]; then
+      die "${label} timed out after ${GIT_TIMEOUT}s" "$code"
+    fi
+    die "${label} failed" "$code"
+  }
+}
+
 # ───────────── git ─────────────
 step "Fetching latest changes"
-git fetch origin "$BRANCH" --quiet
+run_git "fetch origin/$BRANCH" fetch origin "$BRANCH" --quiet
 ok "fetched origin/$BRANCH"
 
 step "Verifying clean worktree"
@@ -120,7 +133,7 @@ ok "worktree clean"
 
 step "Pulling (fast-forward only)"
 BEFORE_REF="$(git rev-parse --short HEAD)"
-git pull --ff-only origin "$BRANCH" --quiet
+run_git "pull origin/$BRANCH" pull --ff-only origin "$BRANCH" --quiet
 AFTER_REF="$(git rev-parse --short HEAD)"
 if [[ "$BEFORE_REF" == "$AFTER_REF" ]]; then
   info "already up to date at ${BOLD}${AFTER_REF}${RESET}"
